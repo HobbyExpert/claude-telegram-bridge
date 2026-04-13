@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Telegram Bridge</title>
+    <style>
+        :root {
+            --bg: #f8f8f8;
+            --surface: #ffffff;
+            --surface-2: #f0f0f0;
+            --border: #e0e0e0;
+            --text: #1a1a1a;
+            --text-muted: #666;
+            --accent: #7c3aed;
+            --accent-dim: rgba(124, 58, 237, 0.08);
+            --green: #16a34a;
+            --green-dim: rgba(22, 163, 74, 0.08);
+            --amber: #d97706;
+            --amber-dim: rgba(217, 119, 6, 0.08);
+            --red: #dc2626;
+            --mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 820px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem 4rem;
+        }
+
+        /* Header */
+        header {
+            padding: 2rem 0 1.5rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2.5rem;
+        }
+
+        header .badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--accent);
+            background: var(--accent-dim);
+            padding: 0.25rem 0.65rem;
+            border-radius: 4px;
+            margin-bottom: 0.75rem;
+        }
+
+        header h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 0.35rem;
+        }
+
+        header p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Architecture */
+        .architecture {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.75rem;
+            margin-bottom: 2rem;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            line-height: 1.8;
+            color: var(--text-muted);
+            overflow-x: auto;
+        }
+
+        .architecture .highlight { color: var(--accent); }
+        .architecture .dim { color: #999; }
+        .architecture .green { color: var(--green); }
+
+        /* Sections */
+        section {
+            margin-bottom: 2.5rem;
+        }
+
+        section h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        /* Command cards */
+        .commands {
+            display: grid;
+            gap: 0.5rem;
+        }
+
+        .cmd {
+            display: grid;
+            grid-template-columns: 160px 1fr;
+            align-items: baseline;
+            padding: 0.65rem 0.85rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            transition: border-color 0.15s;
+        }
+
+        .cmd:hover {
+            border-color: #ccc;
+        }
+
+        .cmd code {
+            font-family: var(--mono);
+            font-size: 0.82rem;
+            color: var(--accent);
+            white-space: nowrap;
+        }
+
+        .cmd span {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+        }
+
+        /* Examples */
+        .examples {
+            display: grid;
+            gap: 0.5rem;
+        }
+
+        .example {
+            padding: 0.75rem 1rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.88rem;
+        }
+
+        .example .prompt {
+            font-family: var(--mono);
+            font-size: 0.82rem;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+
+        .example .desc {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        /* Config table */
+        .config {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .config tr {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .config tr:last-child {
+            border-bottom: none;
+        }
+
+        .config td {
+            padding: 0.6rem 0;
+            font-size: 0.88rem;
+        }
+
+        .config td:first-child {
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            color: var(--accent);
+            width: 220px;
+            padding-right: 1rem;
+        }
+
+        .config td:last-child {
+            color: var(--text-muted);
+        }
+
+        /* Service management */
+        .shell-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .shell-block .label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .shell-block code {
+            display: block;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            color: var(--green);
+            white-space: pre;
+            overflow-x: auto;
+        }
+
+        /* Status indicator */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1rem;
+            background: var(--green-dim);
+            border: 1px solid rgba(22, 163, 74, 0.2);
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            font-size: 0.85rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .status-bar span { color: var(--green); font-weight: 500; }
+        .status-bar .meta { color: var(--text-muted); margin-left: auto; font-size: 0.78rem; }
+
+        /* Proposals */
+        .proposals { display: grid; gap: 0.75rem; }
+
+        .proposal {
+            padding: 1rem 1.15rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            transition: border-color 0.15s;
+        }
+
+        .proposal:hover { border-color: #ccc; }
+
+        .proposal .proposal-header {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-bottom: 0.4rem;
+        }
+
+        .proposal .priority {
+            display: inline-block;
+            font-size: 0.6rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            padding: 0.15rem 0.5rem;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+
+        .priority.high {
+            color: var(--amber);
+            background: var(--amber-dim);
+        }
+
+        .priority.medium {
+            color: var(--accent);
+            background: var(--accent-dim);
+        }
+
+        .priority.low {
+            color: var(--text-muted);
+            background: var(--surface-2);
+        }
+
+        .proposal .title {
+            font-weight: 600;
+            font-size: 0.92rem;
+        }
+
+        .proposal .source {
+            margin-left: auto;
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            white-space: nowrap;
+        }
+
+        .proposal .desc {
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            line-height: 1.55;
+        }
+
+        .proposal .desc code {
+            font-family: var(--mono);
+            font-size: 0.76rem;
+            color: var(--accent);
+            background: var(--surface-2);
+            padding: 0.1rem 0.35rem;
+            border-radius: 3px;
+        }
+
+        .proposal-group-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-top: 0.75rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .proposal-group-label:first-child { margin-top: 0; }
+
+        /* Status legend */
+        .status-legend {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .status-legend .dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.35rem;
+            vertical-align: middle;
+        }
+
+        .dot.high-dot { background: var(--amber); }
+        .dot.med-dot { background: var(--accent); }
+        .dot.low-dot { background: #999; }
+        .dot.done-dot { background: var(--green); }
+
+        .proposal.done {
+            border-color: rgba(22, 163, 74, 0.3);
+            background: rgba(22, 163, 74, 0.06);
+        }
+
+        .priority.done {
+            color: var(--green);
+            background: var(--green-dim);
+        }
+
+        /* Footer */
+        footer {
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .container { padding: 1.25rem 1rem 3rem; }
+            header h1 { font-size: 1.4rem; }
+            .cmd { grid-template-columns: 1fr; gap: 0.15rem; }
+            .cmd code { font-size: 0.78rem; }
+            .config td:first-child { width: 140px; font-size: 0.72rem; }
+            .architecture { font-size: 0.7rem; padding: 1.25rem; }
+            footer { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <header>
+            <div class="badge">Local Service</div>
+            <h1>Claude Telegram Bridge</h1>
+            <p>Control Claude Code on this Mac from Telegram. Runs headless, auto-starts on login.</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-dot"></div>
+            <span>Service active</span>
+            <div class="meta">launchd &middot; com.santibm.claude-telegram-bridge</div>
+        </div>
+
+        <section>
+            <h2>Architecture</h2>
+            <div class="architecture">
+<span class="dim">Telegram</span>                <span class="dim">This Mac</span>
+<span class="dim">───────</span>                <span class="dim">────────</span>
+
+<span class="highlight">@SantiMBPbot</span>  <span class="dim">───poll───</span>  <span class="green">bridge.py</span> <span class="dim">(launchd, always on)</span>
+                            <span class="dim">│</span>
+                            <span class="dim">└──</span> <span class="highlight">claude -p</span> <span class="dim">(headless, per task)</span>
+                                 <span class="dim">│</span>
+                                 <span class="dim">└──</span> <span class="green">your codebase</span>
+            </div>
+        </section>
+
+        <section>
+            <h2>Commands</h2>
+            <div class="commands">
+                <div class="cmd">
+                    <code>any message</code>
+                    <span>Runs as a Claude Code task with streaming output</span>
+                </div>
+                <div class="cmd">
+                    <code>photo / file</code>
+                    <span>Send an image or document to include in the task</span>
+                </div>
+                <div class="cmd">
+                    <code>/status</code>
+                    <span>All Claude processes on this Mac + bridge state</span>
+                </div>
+                <div class="cmd">
+                    <code>/stop</code>
+                    <span>Kill the current running task</span>
+                </div>
+                <div class="cmd">
+                    <code>/continue &lt;msg&gt;</code>
+                    <span>Continue the last session</span>
+                </div>
+                <div class="cmd">
+                    <code>/sessions</code>
+                    <span>Browse &amp; resume recent sessions (inline keyboard)</span>
+                </div>
+                <div class="cmd">
+                    <code>/projects</code>
+                    <span>Quick-switch between ~/Sites/ projects (inline keyboard)</span>
+                </div>
+                <div class="cmd">
+                    <code>/budget &lt;N&gt;</code>
+                    <span>Set max USD per task (default $2)</span>
+                </div>
+                <div class="cmd">
+                    <code>/turns &lt;N&gt;</code>
+                    <span>Set max agentic turns (default 10)</span>
+                </div>
+                <div class="cmd">
+                    <code>/cwd &lt;path&gt;</code>
+                    <span>Switch working directory</span>
+                </div>
+                <div class="cmd">
+                    <code>/model</code>
+                    <span>Switch model (Opus / Sonnet / Haiku) via inline keyboard</span>
+                </div>
+                <div class="cmd">
+                    <code>/cost</code>
+                    <span>Daily cost summary (last 7 days + all-time total)</span>
+                </div>
+                <div class="cmd">
+                    <code>/id</code>
+                    <span>Show your Telegram user ID</span>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <h2>How It Works</h2>
+            <div class="examples">
+                <div class="example">
+                    <div class="prompt">Streaming responses</div>
+                    <div class="desc">Messages edit in real time as Claude works. Tool calls show live
+                        (&#128295; Bash: ls -la). Status reactions track progress:
+                        &#128064; &rarr; &#129300; &rarr; &#128104;&#8205;&#128187; &rarr; &#128269; &rarr; &#128077;
+                    </div>
+                </div>
+                <div class="example">
+                    <div class="prompt">Dangerous command blocking</div>
+                    <div class="desc">Prompts mentioning rm -rf, force push, drop table, etc. are intercepted.
+                        You get a confirm/cancel inline keyboard before execution.</div>
+                </div>
+                <div class="example">
+                    <div class="prompt">Photo &amp; file analysis</div>
+                    <div class="desc">Send a screenshot, PDF, or code file directly in Telegram.
+                        It gets saved locally and passed to Claude for analysis (max 10MB).</div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <h2>Example Prompts</h2>
+            <div class="examples">
+                <div class="example">
+                    <div class="prompt">list the git branches on hobbyexpert</div>
+                    <div class="desc">Quick repo inspection</div>
+                </div>
+                <div class="example">
+                    <div class="prompt">read the last 20 lines of var/log/exception.log in enterprise</div>
+                    <div class="desc">Check Magento errors remotely</div>
+                </div>
+                <div class="example">
+                    <div class="prompt">check if Redis and Elasticsearch are running on nbsd17 via SSH</div>
+                    <div class="desc">Server health check (routes through SSH)</div>
+                </div>
+                <div class="example">
+                    <div class="prompt">what changed in the last 3 commits?</div>
+                    <div class="desc">Quick git summary</div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <h2>Configuration</h2>
+            <table class="config">
+                <tr>
+                    <td>TELEGRAM_BOT_TOKEN</td>
+                    <td>From @BotFather</td>
+                </tr>
+                <tr>
+                    <td>ALLOWED_USER_IDS</td>
+                    <td>663146501</td>
+                </tr>
+                <tr>
+                    <td>DEFAULT_CWD</td>
+                    <td>~/Sites/hobbyexpert</td>
+                </tr>
+                <tr>
+                    <td>DEFAULT_BUDGET_USD</td>
+                    <td>$2.00 per task</td>
+                </tr>
+                <tr>
+                    <td>DEFAULT_MAX_TURNS</td>
+                    <td>10 agentic turns</td>
+                </tr>
+                <tr>
+                    <td>TASK_TIMEOUT_SECONDS</td>
+                    <td>300s (5 min)</td>
+                </tr>
+            </table>
+        </section>
+
+        <section>
+            <h2>Manage Service</h2>
+            <div class="shell-block">
+                <div class="label">Check status</div>
+                <code>launchctl list | grep claude-telegram</code>
+            </div>
+            <div class="shell-block">
+                <div class="label">Stop</div>
+                <code>launchctl unload ~/Library/LaunchAgents/com.santibm.claude-telegram-bridge.plist</code>
+            </div>
+            <div class="shell-block">
+                <div class="label">Start</div>
+                <code>launchctl load ~/Library/LaunchAgents/com.santibm.claude-telegram-bridge.plist</code>
+            </div>
+            <div class="shell-block">
+                <div class="label">Logs</div>
+                <code>tail -f ~/Sites/claude-telegram-bridge/logs/stderr.log</code>
+            </div>
+        </section>
+
+        <section>
+            <h2>Proposals</h2>
+            <div class="status-legend">
+                <span><span class="dot done-dot"></span>Implemented</span>
+                <span><span class="dot med-dot"></span>Medium</span>
+                <span><span class="dot low-dot"></span>Nice to have</span>
+            </div>
+            <div class="proposals">
+
+                <div class="proposal-group-label">Response UX</div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Streaming responses (edit-in-place)</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Instead of waiting for Claude to finish, edit the Telegram message in real time as output streams in.
+                        Use <code>--output-format stream-json</code> and <code>editMessageText</code> with a debounced 1.5s interval.
+                        When content exceeds 4000 chars, finalize the current message and roll over to a new one.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Status reactions as progress indicators</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Use Telegram emoji reactions on the bot's own message to show execution state — no chat clutter.
+                        Stages: <code>&#128064;</code> queued &rarr; <code>&#129300;</code> thinking &rarr; <code>&#128104;&#8205;&#128187;</code> coding &rarr;
+                        <code>&#128269;</code> searching &rarr; <code>&#9989;</code> done &rarr; <code>&#128148;</code> error.
+                        Parse <code>stream-json</code> tool events to determine which stage to show.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Natural boundary message splitting</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        When splitting long messages, search the last 20% of the limit for the best breakpoint:
+                        paragraph break &gt; line break &gt; sentence end &gt; word boundary &gt; hard cut.
+                        Prevents splitting mid-word or mid-code-block.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Reaction acknowledgment instead of reply</span>
+                        <span class="source">claudecode-telegram</span>
+                    </div>
+                    <div class="desc">
+                        When a message is received, add a <code>&#10003;</code> reaction to the user's message instead of sending
+                        "Working..." as a separate message. Cleaner UX, no chat clutter. The "Working..." text becomes
+                        the streaming message that gets edited in place.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">Session Management</div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Session picker with inline keyboard</span>
+                        <span class="source">claudecode-telegram</span>
+                    </div>
+                    <div class="desc">
+                        Replace <code>/continue</code> with a <code>/sessions</code> command that shows an inline keyboard
+                        with clickable buttons for recent sessions. Top button: "Continue most recent".
+                        Below: individual sessions with summary and timestamp. Reads from <code>~/.claude/projects/</code>.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Session idle timeout</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Auto-close session tracking after configurable idle period (default 60 min).
+                        Clear <code>last_session_id</code> so stale sessions aren't accidentally continued.
+                        Configurable via <code>SESSION_IDLE_TIMEOUT</code> env var.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">Input Capabilities</div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Photo, document &amp; file handling</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Accept images, screenshots, and documents sent via Telegram. Download the file via Bot API,
+                        save to a temp path, and include it in the Claude prompt: <code>"Analyze this image: /tmp/photo.jpg"</code>.
+                        Supports PNG, JPG, PDF, and text files. Auto-cleanup after task completes.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">Voice message transcription</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Transcribe incoming voice messages using OpenAI Whisper API before passing to Claude.
+                        Enables hands-free task assignment while away from keyboard.
+                        Requires <code>OPENAI_API_KEY</code> in <code>.env</code>.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">Safety &amp; Control</div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Command blocking for dangerous operations</span>
+                        <span class="source">claudecode-telegram</span>
+                    </div>
+                    <div class="desc">
+                        Block messages that could trigger destructive actions through headless mode:
+                        <code>rm -rf</code>, <code>git push --force</code>, <code>drop table</code>, etc.
+                        Return a warning and require explicit confirmation via inline keyboard before proceeding.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">Rate limiting</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Sliding window rate limiter: max 10 tasks/minute, 60/hour.
+                        Prevents accidental runaway costs from rapid messages.
+                        Track in a simple SQLite DB or in-memory counter.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">Stale task auto-cleanup</span>
+                        <span class="source">claudecode-telegram</span>
+                    </div>
+                    <div class="desc">
+                        If a task runs longer than <code>TASK_TIMEOUT</code> with no output, auto-terminate and notify.
+                        Use a 10-minute staleness check. Clear the process reference so new tasks aren't blocked
+                        by a zombie process.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">Multi-Project &amp; Navigation</div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Project quick-switch keyboard</span>
+                        <span class="source">new</span>
+                    </div>
+                    <div class="desc">
+                        <code>/projects</code> command shows an inline keyboard with all directories under <code>~/Sites/</code>.
+                        Tap one to switch CWD instantly. Much faster than typing <code>/cwd ~/Sites/enterprise</code> each time.
+                        Show current project with a checkmark.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">Output &amp; Delivery</div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">Text-to-speech for responses</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        Add a <code>/tts</code> toggle or inline button. When enabled, convert Claude's response
+                        to a voice note via OpenAI TTS and send as audio. Useful when checking results on the go.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority low">Nice to have</span>
+                        <span class="title">Inline quick-action buttons</span>
+                        <span class="source">telclaude</span>
+                    </div>
+                    <div class="desc">
+                        After each response, show small inline buttons: <code>Continue</code>, <code>New session</code>,
+                        <code>Switch project</code>. Reduces typing for common follow-up actions.
+                        Make configurable since buttons can feel noisy on mobile.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority low">Nice to have</span>
+                        <span class="title">Daily cost summary</span>
+                        <span class="source">new</span>
+                    </div>
+                    <div class="desc">
+                        Track cumulative cost per day from all bridge tasks. Send an automatic summary at end of day
+                        or on demand via <code>/cost</code>. Helps track Telegram-triggered spend separately from
+                        interactive usage.
+                    </div>
+                </div>
+
+                <div class="proposal-group-label">From terranc/claude-telegram-bot-bridge</div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">AskUserQuestion &rarr; inline keyboard</span>
+                        <span class="source">terranc</span>
+                    </div>
+                    <div class="desc">
+                        When Claude outputs numbered options (1. do X, 2. do Y), auto-detect them with regex
+                        and convert to Telegram <code>InlineKeyboardButton</code>s. The selected option gets sent
+                        back as a <code>/continue</code> message. Bridges Claude's interactive prompts to Telegram natively.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority medium">Medium</span>
+                        <span class="title">Persistent SDK stream per user</span>
+                        <span class="source">terranc</span>
+                    </div>
+                    <div class="desc">
+                        Instead of spawning <code>claude -p</code> per task, maintain a long-lived connection
+                        via <code>claude_code_sdk</code>. Enables true conversation continuity, lower latency,
+                        and token-level streaming. Requires switching from CLI subprocess to Python SDK.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority low">Nice to have</span>
+                        <span class="title">Auto-send generated files</span>
+                        <span class="source">terranc</span>
+                    </div>
+                    <div class="desc">
+                        After Claude generates or modifies files, detect image/PDF/zip paths in the response
+                        via regex. Auto-send files under 10MB as Telegram photos or documents.
+                        Scope to project root to avoid leaking sensitive files.
+                    </div>
+                </div>
+
+                <div class="proposal">
+                    <div class="proposal-header">
+                        <span class="priority low">Nice to have</span>
+                        <span class="title">Model switching via /model</span>
+                        <span class="source">terranc</span>
+                    </div>
+                    <div class="desc">
+                        <code>/model</code> shows inline keyboard with Opus / Sonnet / Haiku.
+                        Adds <code>--model</code> flag to the <code>claude -p</code> call.
+                        Useful for quick lookups (Haiku) vs deep tasks (Opus).
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <footer>
+            <div>Claude Telegram Bridge &middot; @SantiMBPbot</div>
+            <a href="https://t.me/SantiMBPbot">Open in Telegram</a>
+        </footer>
+
+    </div>
+</body>
+</html>
