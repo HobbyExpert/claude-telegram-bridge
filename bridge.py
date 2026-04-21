@@ -309,6 +309,30 @@ def _get_system_claude_processes() -> list:
         return []
 
 
+def _session_cwd(session_id: str) -> Optional[str]:
+    """Find the cwd a historical session was recorded in by reading its JSONL."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return None
+    for proj in projects_dir.iterdir():
+        jsonl = proj / f"{session_id}.jsonl"
+        if not jsonl.exists():
+            continue
+        try:
+            with jsonl.open() as f:
+                for line in f:
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except Exception:
+                        continue
+                    if cwd and os.path.isdir(cwd):
+                        return cwd
+        except Exception:
+            pass
+        return None
+    return None
+
+
 def _session_tag(slot: SessionSlot) -> str:
     """Return [name] prefix when running multiple sessions."""
     if gst.multi():
@@ -744,9 +768,17 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         slot = gst.active()
         slot.last_session_id = session_id
         slot.auto_continue = True
+        recorded_cwd = _session_cwd(session_id)
+        if recorded_cwd:
+            slot.cwd = recorded_cwd
+        cwd_line = (
+            f"\nCWD: <code>{html_mod.escape(slot.cwd)}</code>"
+            if recorded_cwd else ""
+        )
         await query.edit_message_text(
             f"[{gst.active_name}] Loaded session "
-            f"<code>{html_mod.escape(session_id[:20])}</code>\n"
+            f"<code>{html_mod.escape(session_id[:20])}</code>"
+            f"{cwd_line}\n"
             "Your next message will resume it, or tap below.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
