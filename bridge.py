@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code Telegram Bridge — control Claude Code from Telegram."""
+"""Claude Code Telegram Bridge — multi-session, control Claude Code from Telegram."""
 
 import asyncio
 import html as html_mod
@@ -12,10 +12,11 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReactionTypeEmoji,
@@ -67,24 +68,59 @@ DANGEROUS_PATTERNS = [
 ]
 
 
-# --- State ------------------------------------------------------------------
-class State:
-    process: Optional[asyncio.subprocess.Process] = None
-    cwd: str = DEFAULT_CWD
-    budget: float = DEFAULT_BUDGET
-    max_turns: int = DEFAULT_MAX_TURNS
-    model: str = DEFAULT_MODEL
-    last_session_id: Optional[str] = None
-    task_start: Optional[float] = None
-    pending_dangerous: Optional[dict] = None
-    auto_continue: bool = True  # auto-resume last session for context
-    last_activity: float = 0.0
-    last_chat_id: Optional[int] = None
+# --- Session Slot -----------------------------------------------------------
+class SessionSlot:
+    """Represents one named Claude Code session."""
+
+    def __init__(
+        self,
+        name: str,
+        cwd: str = DEFAULT_CWD,
+        model: str = DEFAULT_MODEL,
+        budget: float = DEFAULT_BUDGET,
+        max_turns: int = DEFAULT_MAX_TURNS,
+    ):
+        self.name = name
+        self.cwd = cwd
+        self.model = model
+        self.budget = budget
+        self.max_turns = max_turns
+        self.process: Optional[asyncio.subprocess.Process] = None
+        self.stream_task: Optional[asyncio.Task] = None
+        self.last_session_id: Optional[str] = None
+        self.task_start: Optional[float] = None
+        self.last_activity: float = 0.0
+        self.chat_id: Optional[int] = None
+        self.pending_dangerous: Optional[dict] = None
+        self.auto_continue: bool = True
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.returncode is None
 
 
-st = State()
-st.task_timestamps: list = []
-st.daily_costs: dict = {}
+# --- Global State -----------------------------------------------------------
+class GlobalState:
+    def __init__(self):
+        self.sessions: Dict[str, SessionSlot] = {}
+        self.active_name: str = "default"
+        self.task_timestamps: list = []
+        self.daily_costs: dict = {}
+
+    def active(self) -> SessionSlot:
+        if self.active_name not in self.sessions:
+            self.sessions[self.active_name] = SessionSlot(self.active_name)
+        return self.sessions[self.active_name]
+
+    def get_or_create(self, name: str, cwd: str = DEFAULT_CWD) -> SessionSlot:
+        if name not in self.sessions:
+            self.sessions[name] = SessionSlot(name, cwd)
+        return self.sessions[name]
+
+    def multi(self) -> bool:
+        return len(self.sessions) > 1
+
+
+gst = GlobalState()
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -221,11 +257,11 @@ def check_dangerous(prompt: str) -> Optional[str]:
 def check_rate_limit() -> Optional[str]:
     """Check sliding window rate limits. Returns error message or None."""
     now = time.time()
-    st.task_timestamps = [t for t in st.task_timestamps if now - t < 3600]
-    recent_min = sum(1 for t in st.task_timestamps if now - t < 60)
+    gst.task_timestamps = [t for t in gst.task_timestamps if now - t < 3600]
+    recent_min = sum(1 for t in gst.task_timestamps if now - t < 60)
     if recent_min >= RATE_LIMIT_PER_MIN:
         return f"Rate limit: {RATE_LIMIT_PER_MIN} tasks/minute. Try again shortly."
-    if len(st.task_timestamps) >= RATE_LIMIT_PER_HOUR:
+    if len(gst.task_timestamps) >= RATE_LIMIT_PER_HOUR:
         return f"Rate limit: {RATE_LIMIT_PER_HOUR} tasks/hour."
     return None
 
@@ -273,6 +309,14 @@ def _get_system_claude_processes() -> list:
         return []
 
 
+def _session_tag(slot: SessionSlot) -> str:
+    """Return [name] prefix when running multiple sessions."""
+    if gst.multi():
+        marker = " \u25b6" if slot.name == gst.active_name else ""
+        return f"[<b>{html_mod.escape(slot.name)}</b>{marker}] "
+    return ""
+
+
 # --- Commands ---------------------------------------------------------------
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -288,7 +332,10 @@ async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         "/new \u2014 start fresh session (clears context)\n"
         "/context \u2014 toggle auto-continue (on by default)\n"
         "/continue <msg> \u2014 resume last session\n"
-        "/sessions \u2014 browse recent sessions\n"
+        "/sessions \u2014 browse sessions (live + history)\n"
+        "/switch [name] \u2014 switch active session\n"
+        "/spawn <name> [path] \u2014 create a new named session\n"
+        "/kill [name] \u2014 terminate a session\n"
         "/projects \u2014 switch project\n"
         "/model \u2014 switch model (Opus/Sonnet/Haiku)\n"
         "/budget <N> \u2014 USD limit\n"
@@ -306,17 +353,28 @@ async def cmd_id(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
-    running = st.process is not None and st.process.returncode is None
-    elapsed = ""
-    if running and st.task_start:
-        elapsed = f" ({int(time.time() - st.task_start)}s)"
-    lines = [
-        f"**Bridge task:** {'running' + elapsed if running else 'idle'}",
-        f"**CWD:** `{st.cwd}`",
-        f"**Model:** {st.model} | **Budget:** ${st.budget:.2f} | **Turns:** {st.max_turns}",
-        f"**Context:** {'ON (auto-continue)' if st.auto_continue else 'OFF (fresh each time)'}",
-        f"**Last session:** `{st.last_session_id or 'none'}`",
+
+    lines = ["**Active sessions:**\n"]
+    if not gst.sessions:
+        lines.append("  (none yet — send a message to start)")
+    else:
+        for name, slot in gst.sessions.items():
+            marker = " \u25b6 active" if name == gst.active_name else ""
+            status = "running" if slot.is_running() else "idle"
+            if slot.is_running() and slot.task_start:
+                status += f" ({int(time.time() - slot.task_start)}s)"
+            lines.append(
+                f"  **{name}**{marker}: {status} | `{slot.cwd}` | "
+                f"{slot.model} | ${slot.budget:.2f} | {slot.max_turns} turns"
+            )
+
+    lines.append("")
+    slot = gst.active()
+    lines += [
+        f"**Context:** {'ON (auto-continue)' if slot.auto_continue else 'OFF (fresh)'}",
+        f"**Last session:** `{slot.last_session_id or 'none'}`",
     ]
+
     procs = _get_system_claude_processes()
     lines.append("")
     if procs:
@@ -332,96 +390,218 @@ async def cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     await send_long(update.message, "\n".join(lines))
 
 
-async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
-    if st.process and st.process.returncode is None:
-        st.process.terminate()
-        st.process = None
-        st.task_start = None
-        await update.message.reply_text("Task terminated.")
+    name = ctx.args[0] if ctx.args else gst.active_name
+    slot = gst.sessions.get(name)
+    if slot and slot.is_running():
+        if slot.stream_task:
+            slot.stream_task.cancel()
+        slot.process.terminate()
+        await update.message.reply_text(f"Session [{name}] terminated.")
     else:
-        await update.message.reply_text("No task running.")
+        await update.message.reply_text(f"No task running in [{name}].")
 
 
 async def cmd_new(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     """Clear session context — next message starts fresh."""
     if not authorized(update.effective_user.id):
         return
-    st.last_session_id = None
+    gst.active().last_session_id = None
     await update.message.reply_text("Session cleared. Next message starts fresh.")
 
 
 async def cmd_context(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
-    """Toggle auto-continue mode."""
+    """Toggle auto-continue mode for the active session."""
     if not authorized(update.effective_user.id):
         return
-    st.auto_continue = not st.auto_continue
-    state = "ON" if st.auto_continue else "OFF"
+    slot = gst.active()
+    slot.auto_continue = not slot.auto_continue
+    state = "ON" if slot.auto_continue else "OFF"
     desc = (
         "Messages auto-resume the last session (keeps context)."
-        if st.auto_continue
+        if slot.auto_continue
         else "Each message starts a fresh session (no context)."
     )
-    await update.message.reply_text(f"Auto-continue: {state}\n{desc}")
+    await update.message.reply_text(f"[{slot.name}] Auto-continue: {state}\n{desc}")
 
 
 async def cmd_budget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
+    slot = gst.active()
     if ctx.args:
         try:
-            st.budget = float(ctx.args[0])
-            await update.message.reply_text(f"Budget: ${st.budget:.2f}")
+            slot.budget = float(ctx.args[0])
+            await update.message.reply_text(f"[{slot.name}] Budget: ${slot.budget:.2f}")
         except ValueError:
             await update.message.reply_text("Usage: /budget 5.00")
     else:
-        await update.message.reply_text(f"Budget: ${st.budget:.2f}")
+        await update.message.reply_text(f"[{slot.name}] Budget: ${slot.budget:.2f}")
 
 
 async def cmd_turns(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
+    slot = gst.active()
     if ctx.args:
         try:
-            st.max_turns = int(ctx.args[0])
-            await update.message.reply_text(f"Max turns: {st.max_turns}")
+            slot.max_turns = int(ctx.args[0])
+            await update.message.reply_text(f"[{slot.name}] Max turns: {slot.max_turns}")
         except ValueError:
             await update.message.reply_text("Usage: /turns 10")
     else:
-        await update.message.reply_text(f"Max turns: {st.max_turns}")
+        await update.message.reply_text(f"[{slot.name}] Max turns: {slot.max_turns}")
 
 
 async def cmd_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
+    slot = gst.active()
     if ctx.args:
         path = os.path.expanduser(" ".join(ctx.args))
         if os.path.isdir(path):
-            st.cwd = path
-            await update.message.reply_text(f"CWD: {st.cwd}")
+            slot.cwd = path
+            await update.message.reply_text(f"[{slot.name}] CWD: {slot.cwd}")
         else:
             await update.message.reply_text(f"Not found: {path}")
     else:
-        await update.message.reply_text(f"CWD: {st.cwd}")
+        await update.message.reply_text(f"[{slot.name}] CWD: {slot.cwd}")
 
 
 async def cmd_continue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
-    if not st.last_session_id:
+    slot = gst.active()
+    if not slot.last_session_id:
         await update.message.reply_text("No previous session to continue.")
         return
     msg = " ".join(ctx.args) if ctx.args else "Continue."
     await run_claude(update, msg, continue_session=True)
 
 
-async def cmd_sessions(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
-    """Show recent sessions as inline keyboard."""
+async def cmd_spawn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Create (and optionally switch to) a named session.
+
+    Usage: /spawn <name> [project-path]
+    """
     if not authorized(update.effective_user.id):
         return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /spawn <name> [path]\nExample: /spawn akeneo /Users/santibm/Sites/akeneo")
+        return
+
+    name = ctx.args[0]
+    if len(ctx.args) > 1:
+        raw_path = " ".join(ctx.args[1:])
+        cwd = os.path.expanduser(raw_path)
+        if not os.path.isdir(cwd):
+            await update.message.reply_text(f"Path not found: {cwd}")
+            return
+    else:
+        cwd = gst.active().cwd
+
+    existed = name in gst.sessions
+    slot = gst.get_or_create(name, cwd)
+    gst.active_name = name
+
+    verb = "Switched to" if existed else "Created"
+    await update.message.reply_text(
+        f"{verb} session <b>{html_mod.escape(name)}</b>\n"
+        f"CWD: <code>{html_mod.escape(slot.cwd)}</code>\n"
+        f"Now active. Send messages to interact with it.",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_switch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Switch the active session. Shows keyboard if no arg given."""
+    if not authorized(update.effective_user.id):
+        return
+
+    if ctx.args:
+        name = ctx.args[0]
+        slot = gst.get_or_create(name)
+        gst.active_name = name
+        status = "running" if slot.is_running() else "idle"
+        await update.message.reply_text(
+            f"Switched to <b>{html_mod.escape(name)}</b> ({status})\n"
+            f"CWD: <code>{html_mod.escape(slot.cwd)}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Show inline keyboard of all sessions
+    if not gst.sessions:
+        await update.message.reply_text("No sessions yet. Use /spawn <name> to create one.")
+        return
+
+    keyboard = []
+    for name, slot in gst.sessions.items():
+        status = "\u25b6 " if name == gst.active_name else ""
+        running = " \U0001f7e2" if slot.is_running() else " \u26aa"
+        keyboard.append([InlineKeyboardButton(
+            f"{status}{name}{running}",
+            callback_data=f"sw:{name[:56]}",
+        )])
+    keyboard.append([InlineKeyboardButton(
+        "\u2795 New session", callback_data="sw:__new__"
+    )])
+    await update.message.reply_text(
+        "Switch active session:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Kill a named session (or active if no name given)."""
+    if not authorized(update.effective_user.id):
+        return
+    name = ctx.args[0] if ctx.args else gst.active_name
+    slot = gst.sessions.get(name)
+    if not slot:
+        await update.message.reply_text(f"Session [{name}] not found.")
+        return
+
+    if slot.stream_task:
+        slot.stream_task.cancel()
+    if slot.is_running():
+        slot.process.terminate()
+
+    del gst.sessions[name]
+
+    # Fall back to default if we killed the active session
+    if gst.active_name == name:
+        gst.active_name = next(iter(gst.sessions), "default")
+
+    await update.message.reply_text(
+        f"Session [{name}] killed.\n"
+        f"Active: [{gst.active_name}]"
+    )
+
+
+async def cmd_sessions(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    """Show live sessions + recent JSONL history."""
+    if not authorized(update.effective_user.id):
+        return
+
+    keyboard = []
+
+    # --- Live sessions section ---
+    if gst.sessions:
+        for name, slot in gst.sessions.items():
+            status = "\u25b6 " if name == gst.active_name else ""
+            running = " \U0001f7e2" if slot.is_running() else " \u26aa"
+            elapsed = ""
+            if slot.is_running() and slot.task_start:
+                elapsed = f" {int(time.time() - slot.task_start)}s"
+            label = f"{status}{name}{running}{elapsed}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"sw:{name[:56]}")])
+
+    # --- JSONL history section ---
     projects_dir = Path.home() / ".claude" / "projects"
-    sessions = []
+    history = []
     if projects_dir.exists():
         for proj in projects_dir.iterdir():
             if not proj.is_dir():
@@ -430,20 +610,11 @@ async def cmd_sessions(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
                 try:
                     mtime = f.stat().st_mtime
                     project = proj.name.replace("-", "/").split("/")[-1]
-                    sessions.append(dict(id=f.stem, project=project, mtime=mtime))
+                    history.append(dict(id=f.stem, project=project, mtime=mtime))
                 except Exception:
                     continue
-    sessions.sort(key=lambda s: s["mtime"], reverse=True)
-    sessions = sessions[:8]
-    if not sessions:
-        await update.message.reply_text("No recent sessions found.")
-        return
-    keyboard = []
-    if st.last_session_id:
-        keyboard.append([InlineKeyboardButton(
-            "\u25b6 Continue last session", callback_data=f"ses:{st.last_session_id[:56]}"
-        )])
-    for s in sessions:
+    history.sort(key=lambda s: s["mtime"], reverse=True)
+    for s in history[:6]:
         age = int(time.time() - s["mtime"])
         if age < 3600:
             age_str = f"{age // 60}m ago"
@@ -451,12 +622,16 @@ async def cmd_sessions(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
             age_str = f"{age // 3600}h ago"
         else:
             age_str = f"{age // 86400}d ago"
-        label = f"{s['project']} ({age_str})"
-        keyboard.append([InlineKeyboardButton(
-            label, callback_data=f"ses:{s['id'][:56]}"
-        )])
+        label = f"\U0001f4dc {s['project']} ({age_str})"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"ses:{s['id'][:56]}")])
+
+    if not keyboard:
+        await update.message.reply_text("No sessions found.")
+        return
+
     await update.message.reply_text(
-        "Recent sessions:", reply_markup=InlineKeyboardMarkup(keyboard)
+        "Sessions (tap to switch/resume):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -470,13 +645,14 @@ async def cmd_projects(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         return
     dirs = sorted(d.name for d in sites.iterdir() if d.is_dir() and not d.name.startswith("."))
     keyboard = []
+    slot = gst.active()
     for i in range(0, len(dirs), 2):
         row = []
         for d in dirs[i : i + 2]:
-            marker = " \u2713" if str(sites / d) == st.cwd else ""
+            marker = " \u2713" if str(sites / d) == slot.cwd else ""
             row.append(InlineKeyboardButton(d + marker, callback_data=f"cwd:{d}"))
         keyboard.append(row)
-    current = Path(st.cwd).name
+    current = Path(slot.cwd).name
     await update.message.reply_text(
         f"Switch project (current: <code>{html_mod.escape(current)}</code>):",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -488,6 +664,7 @@ async def cmd_model(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     """Show model selection keyboard."""
     if not authorized(update.effective_user.id):
         return
+    slot = gst.active()
     models = [
         ("claude-sonnet-4-6", "Sonnet 4.6"),
         ("claude-opus-4-6", "Opus 4.6"),
@@ -495,17 +672,17 @@ async def cmd_model(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard = []
     for model_id, label in models:
-        marker = " \u2713" if st.model == model_id else ""
+        marker = " \u2713" if slot.model == model_id else ""
         keyboard.append([InlineKeyboardButton(
             label + marker, callback_data=f"model:{model_id}"
         )])
     keyboard.append([InlineKeyboardButton(
-        "Default" + (" \u2713" if st.model is None else ""),
+        "Default" + (" \u2713" if slot.model is None else ""),
         callback_data="model:default",
     )])
-    current = st.model or "default"
+    current = slot.model or "default"
     await update.message.reply_text(
-        f"Select model (current: <code>{html_mod.escape(current)}</code>):",
+        f"[{slot.name}] Select model (current: <code>{html_mod.escape(current)}</code>):",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
@@ -516,17 +693,17 @@ async def cmd_cost(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
     today = time.strftime("%Y-%m-%d")
-    dates = sorted(st.daily_costs.keys(), reverse=True)[:7]
+    dates = sorted(gst.daily_costs.keys(), reverse=True)[:7]
     if not dates:
         await update.message.reply_text("No cost data yet.")
         return
     lines = ["**Daily Cost Summary**\n"]
     for d in dates:
-        costs = st.daily_costs[d]
+        costs = gst.daily_costs[d]
         total = sum(costs)
         marker = " \u2190 today" if d == today else ""
         lines.append(f"`{d}`: ${total:.4f} ({len(costs)} tasks){marker}")
-    grand = sum(sum(c) for c in st.daily_costs.values())
+    grand = sum(sum(c) for c in gst.daily_costs.values())
     lines.append(f"\n**All time:** ${grand:.4f}")
     await send_long(update.message, "\n".join(lines))
 
@@ -541,51 +718,79 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         dirname = data[4:]
         path = str(Path(SITES_DIR) / dirname)
         if os.path.isdir(path):
-            st.cwd = path
-            await query.edit_message_text(f"Switched to: {path}")
+            gst.active().cwd = path
+            await query.edit_message_text(f"[{gst.active_name}] Switched to: {path}")
         else:
             await query.edit_message_text(f"Not found: {path}")
 
+    elif data.startswith("sw:"):
+        name = data[3:]
+        if name == "__new__":
+            await query.edit_message_text(
+                "Use /spawn <name> [path] to create a new session."
+            )
+        else:
+            slot = gst.get_or_create(name)
+            gst.active_name = name
+            status = "running" if slot.is_running() else "idle"
+            await query.edit_message_text(
+                f"Switched to <b>{html_mod.escape(name)}</b> ({status})\n"
+                f"CWD: <code>{html_mod.escape(slot.cwd)}</code>",
+                parse_mode="HTML",
+            )
+
     elif data.startswith("ses:"):
         session_id = data[4:]
-        st.last_session_id = session_id
+        slot = gst.active()
+        slot.last_session_id = session_id
+        slot.auto_continue = True
         await query.edit_message_text(
-            f"Session selected: <code>{html_mod.escape(session_id[:20])}</code>\n"
-            "Send /continue <msg> to resume.",
+            f"[{gst.active_name}] Loaded session "
+            f"<code>{html_mod.escape(session_id[:20])}</code>\n"
+            "Your next message will resume it, or tap below.",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "\u25b6 Resume now",
+                    callback_data="quickact:continue",
+                ),
+            ]]),
         )
 
     elif data == "confirm_dangerous":
-        if st.pending_dangerous:
-            prompt = st.pending_dangerous["prompt"]
-            chat_id = st.pending_dangerous.get("chat_id")
-            st.pending_dangerous = None
+        slot = gst.active()
+        if slot.pending_dangerous:
+            prompt = slot.pending_dangerous["prompt"]
+            chat_id = slot.pending_dangerous.get("chat_id")
+            slot.pending_dangerous = None
             await query.edit_message_text("Confirmed. Running...")
             status_msg = await query.message.chat.send_message("\u23f3")
-            await _run_claude_streaming(chat_id, query.get_bot(), status_msg, prompt)
+            _launch_streaming(slot, chat_id, query.get_bot(), status_msg, prompt)
         else:
             await query.edit_message_text("No pending task.")
 
     elif data == "cancel_dangerous":
-        st.pending_dangerous = None
+        gst.active().pending_dangerous = None
         await query.edit_message_text("Cancelled.")
 
     elif data.startswith("model:"):
         model_val = data[6:]
+        slot = gst.active()
         if model_val == "default":
-            st.model = None
-            await query.edit_message_text("Model: default (CLI decides)")
+            slot.model = DEFAULT_MODEL
+            await query.edit_message_text(f"[{slot.name}] Model: default")
         else:
-            st.model = model_val
-            await query.edit_message_text(f"Model: {model_val}")
+            slot.model = model_val
+            await query.edit_message_text(f"[{slot.name}] Model: {model_val}")
 
     elif data.startswith("quickact:"):
         action = data[9:]
+        slot = gst.active()
         if action == "continue":
             await query.edit_message_text("Send your follow-up message.")
         elif action == "new":
-            st.last_session_id = None
-            await query.edit_message_text("Session cleared. Next message starts fresh.")
+            slot.last_session_id = None
+            await query.edit_message_text(f"[{slot.name}] Session cleared. Next message starts fresh.")
         elif action == "projects":
             sites = Path(SITES_DIR)
             if sites.exists():
@@ -597,7 +802,7 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
                 for i in range(0, len(dirs), 2):
                     row = []
                     for d in dirs[i : i + 2]:
-                        marker = " \u2713" if str(sites / d) == st.cwd else ""
+                        marker = " \u2713" if str(sites / d) == slot.cwd else ""
                         row.append(InlineKeyboardButton(
                             d + marker, callback_data=f"cwd:{d}"
                         ))
@@ -611,8 +816,9 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         option_text = data[7:]
         await query.edit_message_text(f"Selected: {option_text}")
         status_msg = await query.message.chat.send_message("\u23f3")
-        await _run_claude_streaming(
-            query.message.chat_id, query.get_bot(), status_msg,
+        slot = gst.active()
+        _launch_streaming(
+            slot, query.message.chat_id, query.get_bot(), status_msg,
             option_text, continue_session=True,
         )
 
@@ -645,33 +851,53 @@ async def handle_document(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Core: streaming Claude runner ------------------------------------------
+def _launch_streaming(
+    slot: SessionSlot,
+    chat_id: int,
+    bot,
+    status_msg,
+    prompt: str,
+    continue_session: bool = False,
+):
+    """Launch _run_claude_streaming as a background asyncio task."""
+    task = asyncio.create_task(
+        _run_claude_streaming(slot, chat_id, bot, status_msg, prompt, continue_session)
+    )
+    slot.stream_task = task
+
+
 async def run_claude(
     update: Update, prompt: str, continue_session: bool = False
 ):
     if not authorized(update.effective_user.id):
         return
-    if st.process and st.process.returncode is None:
-        await update.message.reply_text("A task is already running. /stop it first.")
+
+    slot = gst.active()
+
+    if slot.is_running():
+        await update.message.reply_text(
+            f"[{slot.name}] A task is already running. /stop it first."
+        )
         return
 
     # Session idle timeout — auto-clear stale sessions
-    if st.last_session_id and st.last_activity:
-        if time.time() - st.last_activity > SESSION_IDLE_TIMEOUT:
-            st.last_session_id = None
+    if slot.last_session_id and slot.last_activity:
+        if time.time() - slot.last_activity > SESSION_IDLE_TIMEOUT:
+            slot.last_session_id = None
 
     # Rate limiting
     rate_msg = check_rate_limit()
     if rate_msg:
         await update.message.reply_text(rate_msg)
         return
-    st.task_timestamps.append(time.time())
-    st.last_activity = time.time()
-    st.last_chat_id = update.effective_chat.id
+    gst.task_timestamps.append(time.time())
+    slot.last_activity = time.time()
+    slot.chat_id = update.effective_chat.id
 
     # Dangerous command check
     danger = check_dangerous(prompt)
     if danger:
-        st.pending_dangerous = {
+        slot.pending_dangerous = {
             "prompt": prompt,
             "chat_id": update.effective_chat.id,
         }
@@ -687,17 +913,16 @@ async def run_claude(
         )
         return
 
-    # Acknowledge
     await react(update.message, "\U0001f44d")
 
-    # Initial streaming message
-    status_msg = await update.message.reply_text("\u23f3")
+    tag = _session_tag(slot)
+    status_msg = await update.message.reply_text(f"{tag}\u23f3")
     await react(status_msg, "\U0001f440")
 
-    # Auto-continue if enabled and we have a previous session
-    should_continue = continue_session or (st.auto_continue and st.last_session_id)
+    should_continue = continue_session or (slot.auto_continue and slot.last_session_id)
 
-    await _run_claude_streaming(
+    _launch_streaming(
+        slot,
         update.effective_chat.id,
         update.get_bot(),
         status_msg,
@@ -707,7 +932,12 @@ async def run_claude(
 
 
 async def _run_claude_streaming(
-    chat_id, bot, status_msg, prompt, continue_session=False
+    slot: SessionSlot,
+    chat_id: int,
+    bot,
+    status_msg,
+    prompt: str,
+    continue_session: bool = False,
 ):
     """Run Claude Code with stream-json and live-edit the Telegram message."""
     cmd = [
@@ -715,16 +945,17 @@ async def _run_claude_streaming(
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--model", st.model,
-        "--max-turns", str(st.max_turns),
-        "--max-budget-usd", str(st.budget),
+        "--model", slot.model,
+        "--max-turns", str(slot.max_turns),
+        "--max-budget-usd", str(slot.budget),
     ]
-    if continue_session and st.last_session_id:
-        cmd.extend(["-r", st.last_session_id])
+    if continue_session and slot.last_session_id:
+        cmd.extend(["-r", slot.last_session_id])
     cmd.append(prompt)
 
+    tag = _session_tag(slot)
     start_time = time.time()
-    st.task_start = start_time
+    slot.task_start = start_time
     accumulated = ""
     last_edit_time = 0.0
     last_edit_len = 0
@@ -733,40 +964,36 @@ async def _run_claude_streaming(
     is_error = False
     current_reaction = "\U0001f440"
 
-    # Typing indicator
     typing_task = asyncio.create_task(_typing_loop(chat_id, bot))
 
     try:
-        st.process = await asyncio.create_subprocess_exec(
+        slot.process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=st.cwd,
+            cwd=slot.cwd,
         )
 
-        # Read raw chunks and split by newline ourselves to avoid
-        # asyncio's 64KB readline limit (stream-json lines can be huge).
         buf = b""
         eof = False
         while not eof:
             try:
                 chunk = await asyncio.wait_for(
-                    st.process.stdout.read(256 * 1024), timeout=TASK_TIMEOUT
+                    slot.process.stdout.read(256 * 1024), timeout=TASK_TIMEOUT
                 )
             except asyncio.TimeoutError:
-                st.process.terminate()
-                await edit_safe(status_msg, "\u23f0 Timed out.")
+                slot.process.terminate()
+                await edit_safe(status_msg, f"{tag}\u23f0 Timed out.")
                 return
 
             if not chunk:
                 eof = True
-                # Process anything left in buffer
                 lines = [buf] if buf else []
             else:
                 buf += chunk
                 parts = buf.split(b"\n")
-                lines = parts[:-1]   # complete lines
-                buf = parts[-1]      # incomplete tail
+                lines = parts[:-1]
+                buf = parts[-1]
 
             for raw_line in lines:
                 raw = raw_line.decode(errors="replace").strip()
@@ -779,7 +1006,6 @@ async def _run_claude_streaming(
 
                 ev_type = event.get("type", "")
 
-                # --- Assistant message ---
                 if ev_type == "assistant":
                     content_blocks = event.get("message", {}).get("content", [])
                     for block in content_blocks:
@@ -805,14 +1031,13 @@ async def _run_claude_streaming(
                             tool_line = f"\U0001f527 {tool_name}"
                             if desc:
                                 tool_line += f": {desc}"
-                            display = f"<i>{html_mod.escape(tool_line)}</i>"
+                            display = tag + f"<i>{html_mod.escape(tool_line)}</i>"
                             if accumulated:
                                 raw_txt = accumulated[-2000:] if len(accumulated) > 2000 else accumulated
-                                display = md_to_html(raw_txt) + "\n\n" + display
+                                display = tag + md_to_html(raw_txt) + "\n\n" + f"<i>{html_mod.escape(tool_line)}</i>"
                             await edit_safe(status_msg, display)
                             last_edit_time = time.time()
 
-                    # Debounced text update
                     now = time.time()
                     if (
                         accumulated
@@ -820,49 +1045,49 @@ async def _run_claude_streaming(
                         and len(accumulated) - last_edit_len >= STREAM_MIN_DELTA
                     ):
                         raw_txt = accumulated[-2500:] if len(accumulated) > 2500 else accumulated
-                        display = md_to_html(raw_txt) + "\n\n<i>generating\u2026</i>"
+                        display = tag + md_to_html(raw_txt) + "\n\n<i>generating\u2026</i>"
                         await edit_safe(status_msg, display)
                         last_edit_time = now
                         last_edit_len = len(accumulated)
 
-                # --- Final result ---
                 elif ev_type == "result":
                     cost = event.get("total_cost_usd", 0) or event.get("cost_usd", 0)
                     turns = event.get("num_turns", 0)
                     is_error = event.get("is_error", False)
-                    st.last_session_id = event.get("session_id")
+                    slot.last_session_id = event.get("session_id")
                     final_text = event.get("result", "")
                     if final_text:
                         accumulated = final_text
                     eof = True
                     break
 
-        await st.process.wait()
+        await slot.process.wait()
 
     except FileNotFoundError:
-        await edit_safe(status_msg, f"Claude not found: {CLAUDE_BIN}")
+        await edit_safe(status_msg, f"{tag}Claude not found: {CLAUDE_BIN}")
+        return
+    except asyncio.CancelledError:
         return
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
-        await edit_safe(status_msg, f"Error: {type(e).__name__}: {e}")
+        await edit_safe(status_msg, f"{tag}Error: {type(e).__name__}: {e}")
         return
     finally:
         typing_task.cancel()
-        st.process = None
-        st.task_start = None
+        slot.process = None
+        slot.task_start = None
+        slot.stream_task = None
 
     # --- Final response ---
     elapsed = int(time.time() - start_time)
     prefix = "\u26a0\ufe0f " if is_error else ""
     footer = f"\n\n\u2014\u2014\u2014\n${cost:.4f} | {turns} turns | {elapsed}s"
-    full_text = prefix + accumulated + footer
+    full_text = tag + prefix + accumulated + footer
 
-    # If short enough, edit the existing message
     formatted = md_to_html(full_text)
     if len(formatted) <= 3900:
         await edit_safe(status_msg, formatted)
     else:
-        # Delete the streaming placeholder and send as split messages
         try:
             await status_msg.delete()
         except Exception:
@@ -886,7 +1111,6 @@ async def _run_claude_streaming(
             except Exception:
                 await bot.send_message(chat_id, _strip_html(chunk)[:4096])
 
-    # Final reaction
     done_emoji = "\U0001f44d" if not is_error else "\U0001f494"
     try:
         if len(formatted) <= 4000:
@@ -894,13 +1118,11 @@ async def _run_claude_streaming(
     except Exception:
         pass
 
-    # Track daily cost
     today = time.strftime("%Y-%m-%d")
-    if today not in st.daily_costs:
-        st.daily_costs[today] = []
-    st.daily_costs[today].append(cost)
+    if today not in gst.daily_costs:
+        gst.daily_costs[today] = []
+    gst.daily_costs[today].append(cost)
 
-    # Auto-send generated files detected in response
     files = detect_sendable_files(accumulated)
     for fp in files:
         try:
@@ -910,7 +1132,7 @@ async def _run_claude_streaming(
         except Exception:
             pass
 
-    # Quick-action buttons (+ numbered option detection)
+    # Quick-action buttons
     buttons = []
     options = detect_numbered_options(accumulated)
     if options:
@@ -919,6 +1141,17 @@ async def _run_claude_streaming(
                 f"{num}. {label[:40]}",
                 callback_data=f"option:{label[:56]}",
             )])
+
+    # Session switcher row when multiple sessions exist
+    if gst.multi():
+        sw_row = []
+        for name in list(gst.sessions.keys())[:3]:
+            marker = "\u25b6" if name == gst.active_name else ""
+            sw_row.append(InlineKeyboardButton(
+                f"{marker}{name}", callback_data=f"sw:{name[:20]}"
+            ))
+        buttons.append(sw_row)
+
     buttons.append([
         InlineKeyboardButton("\u25b6 Continue", callback_data="quickact:continue"),
         InlineKeyboardButton("\u2728 New", callback_data="quickact:new"),
@@ -959,26 +1192,49 @@ async def _stale_task_watchdog(app):
     bot = app.bot
     while True:
         await asyncio.sleep(60)
-        if st.process is not None and st.task_start:
-            elapsed = time.time() - st.task_start
-            if elapsed > TASK_TIMEOUT * 2:
-                try:
-                    st.process.kill()
-                except Exception:
-                    pass
-                st.process = None
-                st.task_start = None
-                if st.last_chat_id:
+        for name, slot in list(gst.sessions.items()):
+            if slot.process is not None and slot.task_start:
+                elapsed = time.time() - slot.task_start
+                if elapsed > TASK_TIMEOUT * 2:
                     try:
-                        await bot.send_message(
-                            st.last_chat_id,
-                            "\u23f0 Task auto-terminated (stale — no output).",
-                        )
+                        slot.process.kill()
                     except Exception:
                         pass
+                    slot.process = None
+                    slot.task_start = None
+                    if slot.stream_task:
+                        slot.stream_task.cancel()
+                        slot.stream_task = None
+                    if slot.chat_id:
+                        try:
+                            await bot.send_message(
+                                slot.chat_id,
+                                f"\u23f0 [{name}] Task auto-terminated (stale — no output).",
+                            )
+                        except Exception:
+                            pass
 
 
 async def _post_init(app):
+    await app.bot.set_my_commands([
+        BotCommand("status", "show active sessions + current settings"),
+        BotCommand("sessions", "browse live sessions + recent history"),
+        BotCommand("switch", "switch active session (name or picker)"),
+        BotCommand("spawn", "create a named session: /spawn <name> [path]"),
+        BotCommand("kill", "terminate a session: /kill [name]"),
+        BotCommand("stop", "stop running task in session"),
+        BotCommand("new", "clear active session context"),
+        BotCommand("continue", "resume last session with a message"),
+        BotCommand("context", "toggle auto-continue on/off"),
+        BotCommand("projects", "switch project directory"),
+        BotCommand("cwd", "show/set working directory"),
+        BotCommand("model", "switch Claude model"),
+        BotCommand("budget", "show/set USD budget"),
+        BotCommand("turns", "show/set max turns"),
+        BotCommand("cost", "daily cost summary"),
+        BotCommand("id", "show your Telegram user id"),
+        BotCommand("help", "show help"),
+    ])
     asyncio.create_task(_stale_task_watchdog(app))
 
 
@@ -1004,6 +1260,9 @@ def main():
     app.add_handler(CommandHandler("cwd", cmd_cwd))
     app.add_handler(CommandHandler("continue", cmd_continue))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
+    app.add_handler(CommandHandler("switch", cmd_switch))
+    app.add_handler(CommandHandler("spawn", cmd_spawn))
+    app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("cost", cmd_cost))
@@ -1012,7 +1271,8 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print(f"Bridge running | CWD: {st.cwd} | Users: {ALLOWED_USER_IDS}")
+    active = gst.active_name
+    print(f"Bridge running | Active: {active} | Users: {ALLOWED_USER_IDS}")
     app.run_polling(drop_pending_updates=True)
 
 
