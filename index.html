@@ -402,7 +402,7 @@
         <header>
             <div class="badge">Local Service</div>
             <h1>Claude Telegram Bridge</h1>
-            <p>Control Claude Code on this Mac from Telegram. Runs headless, auto-starts on login.</p>
+            <p>Control Claude Code on this Mac from Telegram. Multiple named sessions run concurrently, headless, auto-start on login.</p>
         </header>
 
         <div class="status-bar">
@@ -419,7 +419,9 @@
 
 <span class="highlight">@SantiMBPbot</span>  <span class="dim">───poll───</span>  <span class="green">bridge.py</span> <span class="dim">(launchd, always on)</span>
                             <span class="dim">│</span>
-                            <span class="dim">└──</span> <span class="highlight">claude -p</span> <span class="dim">(headless, per task)</span>
+                            <span class="dim">├──</span> <span class="highlight">session: akeneo</span>  <span class="dim">→ claude -p (cwd: ~/Sites/akeneo)</span>
+                            <span class="dim">├──</span> <span class="highlight">session: bridge</span>  <span class="dim">→ claude -p (cwd: ~/Sites/claude-telegram-bridge)</span>
+                            <span class="dim">└──</span> <span class="highlight">session: default</span> <span class="dim">→ claude -p (cwd: ~/Sites)</span>
                                  <span class="dim">│</span>
                                  <span class="dim">└──</span> <span class="green">your codebase</span>
             </div>
@@ -427,10 +429,11 @@
 
         <section>
             <h2>Commands</h2>
+            <div class="proposal-group-label">Basics</div>
             <div class="commands">
                 <div class="cmd">
                     <code>any message</code>
-                    <span>Runs as a Claude Code task with streaming output</span>
+                    <span>Runs as a Claude Code task in the active session with streaming output</span>
                 </div>
                 <div class="cmd">
                     <code>photo / file</code>
@@ -438,43 +441,71 @@
                 </div>
                 <div class="cmd">
                     <code>/status</code>
-                    <span>All Claude processes on this Mac + bridge state</span>
+                    <span>List all sessions (active marker, running state, elapsed time) + system claude processes</span>
                 </div>
                 <div class="cmd">
-                    <code>/stop</code>
-                    <span>Kill the current running task</span>
+                    <code>/stop [name]</code>
+                    <span>Terminate the running task in the named session (defaults to active)</span>
+                </div>
+            </div>
+
+            <div class="proposal-group-label" style="margin-top: 1rem;">Sessions</div>
+            <div class="commands">
+                <div class="cmd">
+                    <code>/sessions</code>
+                    <span>Browse live sessions + recent JSONL history; tap to switch or resume</span>
+                </div>
+                <div class="cmd">
+                    <code>/switch [name]</code>
+                    <span>Switch the active session. No arg &rarr; inline keyboard picker</span>
+                </div>
+                <div class="cmd">
+                    <code>/spawn &lt;name&gt; [path]</code>
+                    <span>Create a new named session with its own cwd and become active</span>
+                </div>
+                <div class="cmd">
+                    <code>/kill [name]</code>
+                    <span>Terminate and remove a session (defaults to active)</span>
+                </div>
+                <div class="cmd">
+                    <code>/new</code>
+                    <span>Clear the active session's context (next message starts fresh)</span>
                 </div>
                 <div class="cmd">
                     <code>/continue &lt;msg&gt;</code>
-                    <span>Continue the last session</span>
+                    <span>Explicitly resume the active session's last conversation</span>
                 </div>
                 <div class="cmd">
-                    <code>/sessions</code>
-                    <span>Browse &amp; resume recent sessions (inline keyboard)</span>
+                    <code>/context</code>
+                    <span>Toggle auto-continue for the active session (on by default)</span>
                 </div>
+            </div>
+
+            <div class="proposal-group-label" style="margin-top: 1rem;">Settings</div>
+            <div class="commands">
                 <div class="cmd">
                     <code>/projects</code>
-                    <span>Quick-switch between ~/Sites/ projects (inline keyboard)</span>
-                </div>
-                <div class="cmd">
-                    <code>/budget &lt;N&gt;</code>
-                    <span>Set max USD per task (default $2)</span>
-                </div>
-                <div class="cmd">
-                    <code>/turns &lt;N&gt;</code>
-                    <span>Set max agentic turns (default 10)</span>
+                    <span>Quick-switch the active session's cwd between ~/Sites/ dirs</span>
                 </div>
                 <div class="cmd">
                     <code>/cwd &lt;path&gt;</code>
-                    <span>Switch working directory</span>
+                    <span>Set the active session's working directory</span>
                 </div>
                 <div class="cmd">
                     <code>/model</code>
-                    <span>Switch model (Opus / Sonnet / Haiku) via inline keyboard</span>
+                    <span>Switch model for the active session (Opus / Sonnet / Haiku)</span>
+                </div>
+                <div class="cmd">
+                    <code>/budget &lt;N&gt;</code>
+                    <span>Set max USD per task for the active session (default $2)</span>
+                </div>
+                <div class="cmd">
+                    <code>/turns &lt;N&gt;</code>
+                    <span>Set max agentic turns for the active session (default 10)</span>
                 </div>
                 <div class="cmd">
                     <code>/cost</code>
-                    <span>Daily cost summary (last 7 days + all-time total)</span>
+                    <span>Daily cost summary across all sessions (last 7 days + all-time total)</span>
                 </div>
                 <div class="cmd">
                     <code>/id</code>
@@ -486,6 +517,19 @@
         <section>
             <h2>How It Works</h2>
             <div class="examples">
+                <div class="example">
+                    <div class="prompt">Multiple concurrent sessions</div>
+                    <div class="desc">Spawn named sessions (<code>/spawn akeneo /Users/santibm/Sites/akeneo</code>)
+                        each with their own cwd, model, budget, and conversation history. Typed messages route
+                        to the active session. When multiple sessions exist, responses are prefixed with
+                        <code>[name &#9654;]</code> so you always know which one spoke.</div>
+                </div>
+                <div class="example">
+                    <div class="prompt">Resuming a historical session</div>
+                    <div class="desc">Tapping a &#128220; entry in <code>/sessions</code> reads the JSONL to recover the
+                        exact cwd where it was recorded, sets it on the active slot, and arms auto-continue —
+                        so your next message lands in the right project with the right context.</div>
+                </div>
                 <div class="example">
                     <div class="prompt">Streaming responses</div>
                     <div class="desc">Messages edit in real time as Claude works. Tool calls show live
@@ -582,7 +626,7 @@
             <h2>Proposals</h2>
             <div class="status-legend">
                 <span><span class="dot done-dot"></span>Implemented</span>
-                <span><span class="dot med-dot"></span>Medium</span>
+                <span><span class="dot med-dot"></span>Planned</span>
                 <span><span class="dot low-dot"></span>Nice to have</span>
             </div>
             <div class="proposals">
@@ -647,13 +691,56 @@
                 <div class="proposal done">
                     <div class="proposal-header">
                         <span class="priority done">Done</span>
+                        <span class="title">Multi-session registry with named slots</span>
+                        <span class="source">new</span>
+                    </div>
+                    <div class="desc">
+                        Refactored the single <code>State</code> class into a <code>GlobalState</code> holding a dict of
+                        named <code>SessionSlot</code>s. Each slot owns its own subprocess, cwd, model, budget, and
+                        conversation history. Commands: <code>/spawn</code>, <code>/switch</code>, <code>/kill</code>.
+                        Output is prefixed with <code>[name &#9654;]</code> when more than one session exists so messages
+                        from different sessions don't blur together.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
                         <span class="title">Session picker with inline keyboard</span>
                         <span class="source">claudecode-telegram</span>
                     </div>
                     <div class="desc">
-                        Replace <code>/continue</code> with a <code>/sessions</code> command that shows an inline keyboard
-                        with clickable buttons for recent sessions. Top button: "Continue most recent".
-                        Below: individual sessions with summary and timestamp. Reads from <code>~/.claude/projects/</code>.
+                        <code>/sessions</code> shows an inline keyboard: live sessions at the top with status dots
+                        (&#128994; running, &#9899; idle) and elapsed time, then recent JSONL history from
+                        <code>~/.claude/projects/</code>. Tap a live one to switch active; tap a &#128220; history
+                        entry to load it into the active slot.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Historical session resume with cwd recovery</span>
+                        <span class="source">new</span>
+                    </div>
+                    <div class="desc">
+                        Tapping a JSONL history entry reads the first few lines to extract the <code>cwd</code>
+                        the session was originally recorded in, and sets it on the active slot. Without this,
+                        <code>claude -r &lt;id&gt;</code> ran from the wrong directory and exited silently with
+                        <code>is_error=true</code> and zero turns.
+                    </div>
+                </div>
+
+                <div class="proposal done">
+                    <div class="proposal-header">
+                        <span class="priority done">Done</span>
+                        <span class="title">Bot command menu for / autocomplete</span>
+                        <span class="source">new</span>
+                    </div>
+                    <div class="desc">
+                        Registered a full <code>BotCommand</code> list via <code>bot.set_my_commands</code> in
+                        <code>_post_init</code>. Typing <code>/</code> on Telegram now surfaces every supported
+                        command with a short description — no need to remember the exact name.
                     </div>
                 </div>
 
@@ -685,16 +772,17 @@
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority medium">Medium</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Voice message transcription</span>
                         <span class="source">telclaude</span>
                     </div>
                     <div class="desc">
-                        Transcribe incoming voice messages using OpenAI Whisper API before passing to Claude.
-                        Enables hands-free task assignment while away from keyboard.
-                        Requires <code>OPENAI_API_KEY</code> in <code>.env</code>.
+                        Send a voice note or audio file; the bridge downloads it, POSTs to OpenAI Whisper
+                        (<code>whisper-1</code>), echoes the transcript with a 👂 prefix, and forwards the
+                        text to Claude in the active session. 25MB limit. Requires <code>OPENAI_API_KEY</code>
+                        in <code>.env</code>.
                     </div>
                 </div>
 
@@ -713,29 +801,29 @@
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority medium">Medium</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Rate limiting</span>
                         <span class="source">telclaude</span>
                     </div>
                     <div class="desc">
-                        Sliding window rate limiter: max 10 tasks/minute, 60/hour.
-                        Prevents accidental runaway costs from rapid messages.
-                        Track in a simple SQLite DB or in-memory counter.
+                        Sliding window rate limiter: <code>RATE_LIMIT_PER_MIN</code> (default 10) and
+                        <code>RATE_LIMIT_PER_HOUR</code> (default 60). Prevents accidental runaway costs
+                        from rapid messages. In-memory timestamp deque, checked before spawning each task.
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority medium">Medium</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Stale task auto-cleanup</span>
                         <span class="source">claudecode-telegram</span>
                     </div>
                     <div class="desc">
-                        If a task runs longer than <code>TASK_TIMEOUT</code> with no output, auto-terminate and notify.
-                        Use a 10-minute staleness check. Clear the process reference so new tasks aren't blocked
-                        by a zombie process.
+                        Background watchdog sweeps every minute across all sessions. If a slot's subprocess
+                        has been running longer than <code>TASK_TIMEOUT * 2</code>, it's killed, its stream task
+                        cancelled, and the chat notified — so zombie processes can't block new tasks on that slot.
                     </div>
                 </div>
 
@@ -768,44 +856,45 @@
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority low">Nice to have</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Inline quick-action buttons</span>
                         <span class="source">telclaude</span>
                     </div>
                     <div class="desc">
-                        After each response, show small inline buttons: <code>Continue</code>, <code>New session</code>,
-                        <code>Switch project</code>. Reduces typing for common follow-up actions.
-                        Make configurable since buttons can feel noisy on mobile.
+                        After each response, inline buttons appear: <code>&#9654; Continue</code>,
+                        <code>&#10024; New</code>, <code>&#128193; Projects</code>. When more than one session exists,
+                        a session switcher row is added. Reduces typing for common follow-up actions.
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority low">Nice to have</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Daily cost summary</span>
                         <span class="source">new</span>
                     </div>
                     <div class="desc">
-                        Track cumulative cost per day from all bridge tasks. Send an automatic summary at end of day
-                        or on demand via <code>/cost</code>. Helps track Telegram-triggered spend separately from
+                        Cumulative cost tracked per day across all sessions. <code>/cost</code> prints the last 7 days
+                        plus an all-time total. Helps track Telegram-triggered spend separately from
                         interactive usage.
                     </div>
                 </div>
 
                 <div class="proposal-group-label">From terranc/claude-telegram-bot-bridge</div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority medium">Medium</span>
+                        <span class="priority done">Done</span>
                         <span class="title">AskUserQuestion &rarr; inline keyboard</span>
                         <span class="source">terranc</span>
                     </div>
                     <div class="desc">
-                        When Claude outputs numbered options (1. do X, 2. do Y), auto-detect them with regex
-                        and convert to Telegram <code>InlineKeyboardButton</code>s. The selected option gets sent
-                        back as a <code>/continue</code> message. Bridges Claude's interactive prompts to Telegram natively.
+                        When Claude outputs numbered options (1. do X, 2. do Y), <code>detect_numbered_options</code>
+                        turns them into inline buttons. Tapping one sends the selected label back as a
+                        <code>continue</code> prompt in the active session. Bridges Claude's interactive prompts
+                        to Telegram natively.
                     </div>
                 </div>
 
@@ -822,29 +911,28 @@
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority low">Nice to have</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Auto-send generated files</span>
                         <span class="source">terranc</span>
                     </div>
                     <div class="desc">
-                        After Claude generates or modifies files, detect image/PDF/zip paths in the response
-                        via regex. Auto-send files under 10MB as Telegram photos or documents.
-                        Scope to project root to avoid leaking sensitive files.
+                        After each task, <code>detect_sendable_files</code> scans the response for image/PDF/zip
+                        paths and auto-sends any under 10MB as Telegram photos or documents.
                     </div>
                 </div>
 
-                <div class="proposal">
+                <div class="proposal done">
                     <div class="proposal-header">
-                        <span class="priority low">Nice to have</span>
+                        <span class="priority done">Done</span>
                         <span class="title">Model switching via /model</span>
                         <span class="source">terranc</span>
                     </div>
                     <div class="desc">
-                        <code>/model</code> shows inline keyboard with Opus / Sonnet / Haiku.
-                        Adds <code>--model</code> flag to the <code>claude -p</code> call.
-                        Useful for quick lookups (Haiku) vs deep tasks (Opus).
+                        <code>/model</code> shows an inline keyboard with Sonnet / Opus / Haiku, scoped to the
+                        active session. The chosen model is passed as <code>--model</code> to subsequent
+                        <code>claude -p</code> calls for that slot.
                     </div>
                 </div>
 
