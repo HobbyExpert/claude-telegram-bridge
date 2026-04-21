@@ -48,6 +48,12 @@ TASK_TIMEOUT = int(os.getenv("TASK_TIMEOUT_SECONDS", "300"))
 CLAUDE_BIN = os.getenv("CLAUDE_BIN", "claude")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "sonnet")
 SITES_DIR = os.getenv("SITES_DIR", str(Path.home() / "Sites"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_STT_URL = os.getenv(
+    "OPENAI_STT_URL",
+    "https://api.openai.com/v1/audio/transcriptions",
+)
+OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "whisper-1")
 
 STREAM_EDIT_INTERVAL = 1.5
 STREAM_MIN_DELTA = 50
@@ -882,6 +888,75 @@ async def handle_document(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     await run_claude(update, f"{caption}\n\nFile path: {tmp.name}")
 
 
+async def _transcribe_whisper(file_path: str) -> Optional[str]:
+    """Send an audio file to OpenAI Whisper. Returns transcribed text or None."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(file_path, "rb") as f:
+                resp = await client.post(
+                    OPENAI_STT_URL,
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data={"model": OPENAI_STT_MODEL},
+                    files={"file": (os.path.basename(file_path), f, "audio/ogg")},
+                )
+        if resp.status_code != 200:
+            print(f"Whisper STT error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+            return None
+        text = (resp.json().get("text") or "").strip()
+        return text or None
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
+async def handle_voice(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not authorized(update.effective_user.id):
+        return
+
+    media = update.message.voice or update.message.audio
+    if not media:
+        return
+
+    if not OPENAI_API_KEY:
+        await update.message.reply_text(
+            "Voice input not configured. Set OPENAI_API_KEY in .env."
+        )
+        return
+
+    if media.file_size and media.file_size > 25 * 1024 * 1024:
+        mb = media.file_size // (1024 * 1024)
+        await update.message.reply_text(f"Audio too large ({mb}MB). Whisper limit: 25MB.")
+        return
+
+    await react(update.message, "\U0001f442")  # 👂
+
+    tg_file = await media.get_file()
+    suffix = ".oga" if update.message.voice else ".mp3"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir="/tmp")
+    tmp.close()
+    await tg_file.download_to_drive(tmp.name)
+
+    try:
+        text = await _transcribe_whisper(tmp.name)
+    finally:
+        try:
+            os.remove(tmp.name)
+        except Exception:
+            pass
+
+    if not text:
+        await update.message.reply_text("Transcription failed. Check stderr log.")
+        return
+
+    await update.message.reply_text(
+        f"\U0001f442 <i>{html_mod.escape(text)}</i>",
+        parse_mode="HTML",
+    )
+
+    await run_claude(update, text)
+
+
 # --- Core: streaming Claude runner ------------------------------------------
 def _launch_streaming(
     slot: SessionSlot,
@@ -1301,6 +1376,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     active = gst.active_name
