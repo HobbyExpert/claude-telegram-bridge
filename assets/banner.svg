@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" role="img" aria-label="Claude Code Telegram Bridge">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#33B1F0"/>
+      <stop offset="0.55" stop-color="#229ED9"/>
+      <stop offset="1" stop-color="#166FA0"/>
+    </linearGradient>
+    <clipPath id="round"><rect x="0" y="0" width="1200" height="300" rx="28"/></clipPath>
+  </defs>
+  <g clip-path="url(#round)">
+    <rect x="0" y="0" width="1200" height="300" fill="url(#bg)"/>
+
+    <!-- avión de papel (motivo Telegram) -->
+    <g fill="#FFFFFF" fill-opacity="0.16">
+      <path d="M955 88 L1180 150 L955 212 L998 150 Z"/>
+    </g>
+    <g stroke="#FFFFFF" stroke-opacity="0.32" fill="none" stroke-width="2.5" stroke-linejoin="round">
+      <path d="M955 88 L998 150 L955 212"/>
+      <path d="M998 150 L1180 150"/>
+    </g>
+    <!-- estela -->
+    <g stroke="#FFFFFF" stroke-opacity="0.18" fill="none" stroke-width="2.5" stroke-linecap="round">
+      <line x1="905" y1="150" x2="945" y2="150"/>
+      <line x1="900" y1="120" x2="935" y2="120"/>
+      <line x1="900" y1="180" x2="935" y2="180"/>
+    </g>
+
+    <!-- acento -->
+    <rect x="60" y="108" width="52" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.7"/>
+
+    <!-- puntos decorativos -->
+    <g fill="#FFFFFF" fill-opacity="0.12">
+      <circle cx="70" cy="252" r="4"/><circle cx="94" cy="252" r="4"/><circle cx="118" cy="252" r="4"/>
+    </g>
+
+    <!-- texto -->
+    <text x="62" y="92" font-family="-apple-system, 'Segoe UI', Arial, sans-serif" font-size="21"
+          font-weight="700" fill="#FFFFFF" fill-opacity="0.85" letter-spacing="5">CLAUDE CODE &#183; TELEGRAM</text>
+    <text x="56" y="188" font-family="Georgia, 'Times New Roman', serif" font-size="76"
+          font-weight="700" fill="#FFFFFF">Telegram Bridge</text>
+    <text x="62" y="236" font-family="-apple-system, 'Segoe UI', Arial, sans-serif" font-size="23"
+          fill="#FFFFFF" fill-opacity="0.9">Controla Claude Code desde el m&#243;vil &#183; streaming &#183; voz &#183; multi-sesi&#243;n</text>
+  </g>
+</svg>
